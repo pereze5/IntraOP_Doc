@@ -15,6 +15,7 @@ library(rmarkdown)
 library(tools)
 library(glue)
 library(shinyTime)
+library(zip)
 
 
 # Define UI
