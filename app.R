@@ -9,14 +9,12 @@ library(tidyr)
 library(dplyr)
 library(RColorBrewer)
 library(data.table)
-library(DT)
 library(shinyWidgets)
 library(rmarkdown)
 library(tools)
 library(glue)
 library(shinyTime)
-library(zip)
-
+library(zip)  # needed for zipr()
 
 # Define UI
 ui <- fluidPage(
@@ -31,54 +29,50 @@ ui <- fluidPage(
   
   sidebarLayout(
     sidebarPanel(
-  div(
-    id = "input_form",
-    
-    textInput("sample_id", "Sample ID (IOPX):"),
-    textInput("experiment_id", "Experiment ID (YYYY_MM_DD_IOPX):"),
-    dateInput("experiment_date", "Experiment Date:", value = Sys.Date()),
-    textInput("suspected_diagnosis", "Suspected Diagnosis:"),
-
-    textInput("surgery_time", "Surgery Time (HH:MM):", placeholder = "e.g. 13:15"),
-    textInput("tissue_acquisition_time", "Tissue Acquisition Time (HH:MM):", placeholder = "e.g. 13:45"),
-    textInput("dna_extraction_time", "DNA Extraction Start (HH:MM):", placeholder = "e.g. 14:10"),
-    textInput("library_prep_time", "Library Prep Time (HH:MM):", placeholder = "e.g. 16:00"),
-    textInput("sequencing_time", "Sequencing Start (HH:MM):", placeholder = "e.g. 18:30"),
-    textInput("nanodx_report_time", "nanoDx Report Time (HH:MM):", placeholder = "e.g. 21:00"),
-    
-    textInput("nanodx_classification", "nanoDx Classification:"),
-    numericInput("nanodx_score", "nanoDx Score:", value = NA, min = 0, max = 1, step = 0.01),
-    fileInput("pdf_report", "Attach nanoDx PDF report:", accept = ".pdf"),
-    actionButton("save", "Save Entry", class = "btn-primary")
-  ),
-  width = 4
-),
+      div(
+        id = "input_form",
+        textInput("sample_id", "Sample ID (IOPX):"),
+        textInput("experiment_id", "Experiment ID (YYYY_MM_DD_IOPX):"),
+        dateInput("experiment_date", "Experiment Date:", value = Sys.Date()),
+        textInput("suspected_diagnosis", "Suspected Diagnosis:"),
+        
+        textInput("surgery_time", "Surgery Time (HH:MM):", placeholder = "e.g. 13:15"),
+        textInput("tissue_acquisition_time", "Tissue Acquisition Time (HH:MM):", placeholder = "e.g. 13:45"),
+        textInput("dna_extraction_time", "DNA Extraction Start (HH:MM):", placeholder = "e.g. 14:10"),
+        textInput("library_prep_time", "Library Prep Time (HH:MM):", placeholder = "e.g. 16:00"),
+        textInput("sequencing_time", "Sequencing Start (HH:MM):", placeholder = "e.g. 18:30"),
+        textInput("nanodx_report_time", "nanoDx Report Time (HH:MM):", placeholder = "e.g. 21:00"),
+        
+        textInput("nanodx_classification", "nanoDx Classification:"),
+        numericInput("nanodx_score", "nanoDx Score:", value = NA, min = 0, max = 1, step = 0.01),
+        fileInput("pdf_report", "Attach nanoDx PDF report:", accept = ".pdf"),
+        actionButton("save", "Save Entry", class = "btn-primary")
+      ),
+      width = 4
+    ),
     
     mainPanel(
-  h4("Download Results"),
-  downloadButton("download_zip", "Download ZIP File", class = "btn-success"),
-  br(), br(),
-  h4("Recorded Entries for Current Session"),
-  DTOutput("records"),
-  width = 8
-)
+      h4("Download Results"),
+      downloadButton("download_zip", "Download ZIP File", class = "btn-success", disabled = TRUE),
+      br(), br(),
+      textOutput("status_message"),
+      width = 8
+    )
   )
 )
-
 
 # Define server logic
 server <- function(input, output, session) {
   useShinyjs()
-  records_rv <- reactiveVal(data.table())
-
+  zip_path_rv <- reactiveVal(NULL)
+  
   # Helper to validate HH:MM time format
   valid_hhmm <- function(x) grepl("^([01]?\\d|2[0-3]):[0-5]\\d$", x %||% "")
   `%||%` <- function(a, b) if (is.null(a) || is.na(a)) b else a
-
-  # ---- Reactive trigger to prepare download ----
+  
   observeEvent(input$save, {
     req(input$experiment_id, input$sample_id)
-
+    
     # Validate time fields
     if (!all(
       valid_hhmm(input$surgery_time),
@@ -91,20 +85,21 @@ server <- function(input, output, session) {
       showNotification("Please enter all times as HH:MM (24h).", type = "error")
       return()
     }
-
-    # Create temporary experiment folder
+    
+    disable("save")  # prevent double-click
+    on.exit(enable("save"), add = TRUE)
+    
+    # Create temporary folder
     exp_dir <- file.path(tempdir(), input$experiment_id)
     dir.create(exp_dir, recursive = TRUE, showWarnings = FALSE)
-
-    # Handle uploaded PDF
-    uploaded_pdf_name <- NULL
+    # Handle uploaded PDF — keep original filename
     if (!is.null(input$pdf_report)) {
-      uploaded_pdf_name <- paste0(input$sample_id, "_uploaded_nanoDx_report.pdf")
+      original_name <- input$pdf_report$name
       file.copy(input$pdf_report$datapath,
-                file.path(exp_dir, uploaded_pdf_name),
+                file.path(exp_dir, original_name),
                 overwrite = TRUE)
     }
-
+    
     # Combine date + times
     exp_date <- input$experiment_date
     surgery_start_time        <- as.POSIXct(paste(exp_date, input$surgery_time))
@@ -113,8 +108,9 @@ server <- function(input, output, session) {
     library_prep_time         <- as.POSIXct(paste(exp_date, input$library_prep_time))
     sequencing_start_time     <- as.POSIXct(paste(exp_date, input$sequencing_time))
     nanodx_pdf_report_time    <- as.POSIXct(paste(exp_date, input$nanodx_report_time))
-
-    # Create record
+    
+    # Save CSV
+    csv_file <- file.path(exp_dir, paste0(input$experiment_id, "_intraop_results_reporting.csv"))
     new_entry <- data.table(
       SampleID                  = input$sample_id,
       ExperimentID              = input$experiment_id,
@@ -129,12 +125,9 @@ server <- function(input, output, session) {
       nanoDx_score              = input$nanodx_score,
       Timestamp                 = as.character(Sys.time())
     )
-
-    # Save CSV
-    csv_file <- file.path(exp_dir, paste0(input$experiment_id, "_intraop_results_reporting.csv"))
     fwrite(new_entry, csv_file)
-
-    # Generate summary report (always HTML to avoid LaTeX dependency)
+    
+    # Generate HTML summary report
     rmd_content <- glue("
 ---
 title: 'Intraoperative Report Summary'
@@ -161,48 +154,35 @@ Generated on: {Sys.time()}
 ")
     tmp_rmd <- tempfile(fileext = ".Rmd")
     writeLines(rmd_content, tmp_rmd)
-    summary_file <- file.path(exp_dir, paste0(input$sample_id, "_summary.html"))
-    rmarkdown::render(tmp_rmd, output_file = summary_file, quiet = TRUE)
-
-    # Create zip archive for download
+    rmarkdown::render(tmp_rmd,
+                      output_file = file.path(exp_dir, paste0(input$experiment_id, "_summary.html")),
+                      quiet = TRUE)
+    
+    # Create ZIP archive for download
     zip_path <- tempfile(fileext = ".zip")
     zip::zipr(zip_path, files = list.files(exp_dir, full.names = TRUE))
-
-    # Store path so downloadHandler can use it
-    records_rv(zip_path)
-
-    # Reset form
+    zip_path_rv(zip_path)
+    
+    # Reset and notify
     reset("input_form")
-    showNotification("Entry saved — ZIP ready for download below.", type = "message")
+    output$status_message <- renderText("Entry saved — ZIP ready for download below.")
+    enable("download_zip")  # ✅ Enable download button now
+    showNotification("ZIP file created successfully.", type = "message")
+    
   })
-
-  # ---- Download ZIP ----
+  
+  # Download handler
   output$download_zip <- downloadHandler(
     filename = function() {
       paste0(input$experiment_id, "_IntraOp_Report.zip")
     },
     content = function(file) {
-      req(records_rv())
-      file.copy(records_rv(), file)
+      req(zip_path_rv())
+      file.copy(zip_path_rv(), file)
     },
     contentType = "application/zip"
   )
-
-  # ---- Show table ----
-  output$records <- renderDT({
-    if (!is.null(records_rv())) {
-      datatable(data.table(File = basename(records_rv())),
-                options = list(dom = "t"),
-                rownames = FALSE)
-    } else {
-      datatable(data.table(Message = "No saved entries yet."),
-                options = list(dom = "t"),
-                rownames = FALSE)
-    }
-  })
 }
 
-
-# Run app
+# Run the app
 shinyApp(ui = ui, server = server)
-
