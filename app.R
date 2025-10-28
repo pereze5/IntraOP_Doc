@@ -16,18 +16,6 @@ library(tools)
 library(glue)
 library(shinyTime)
 
-# --- Define base data directory on Charité network drive ---
-# Try to use Charité network path, fall back to local storage
-base_dir <- "\\\\Charite.de\\Centren\\AG\\AG-Euskirchen\\Daten\\IntraOP_Berlin"
-
-if (!dir.exists(base_dir)) {
-  message("⚠️ Network path not available, using local 'data' folder instead.")
-  base_dir <- "data"
-}
-
-if (!dir.exists(base_dir)) dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
-data_dir <- file.path(base_dir)
-
 
 # Define UI
 ui <- fluidPage(
@@ -66,30 +54,31 @@ ui <- fluidPage(
 ),
     
     mainPanel(
-      h4("Recorded Entries for Current Experiment"),
-      DTOutput("records"),
-      width = 8
-    )
+  h4("Download Results"),
+  downloadButton("download_zip", "Download ZIP File", class = "btn-success"),
+  br(), br(),
+  h4("Recorded Entries for Current Session"),
+  DTOutput("records"),
+  width = 8
+)
   )
 )
 
 
 # Define server logic
 server <- function(input, output, session) {
-
-  # --- Expose local/network data_dir for browser access ---
-  addResourcePath("expfiles", data_dir)
-
+  useShinyjs()
   records_rv <- reactiveVal(data.table())
 
-  # Simple helpers
+  # Helper to validate HH:MM time format
   valid_hhmm <- function(x) grepl("^([01]?\\d|2[0-3]):[0-5]\\d$", x %||% "")
   `%||%` <- function(a, b) if (is.null(a) || is.na(a)) b else a
 
+  # ---- Reactive trigger to prepare download ----
   observeEvent(input$save, {
     req(input$experiment_id, input$sample_id)
 
-    # ---- Validate time fields ----
+    # Validate time fields
     if (!all(
       valid_hhmm(input$surgery_time),
       valid_hhmm(input$tissue_acquisition_time),
@@ -102,19 +91,20 @@ server <- function(input, output, session) {
       return()
     }
 
-    # ---- Create experiment-specific directory ----
-    exp_dir <- file.path(data_dir, input$experiment_id)
-    if (!dir.exists(exp_dir)) dir.create(exp_dir, recursive = TRUE)
+    # Create temporary experiment folder
+    exp_dir <- file.path(tempdir(), input$experiment_id)
+    dir.create(exp_dir, recursive = TRUE, showWarnings = FALSE)
 
-    # ---- Handle uploaded PDF ----
-    uploaded_pdf_name <- NA
+    # Handle uploaded PDF
+    uploaded_pdf_name <- NULL
     if (!is.null(input$pdf_report)) {
       uploaded_pdf_name <- paste0(input$sample_id, "_uploaded_nanoDx_report.pdf")
-      uploaded_pdf_path <- file.path(exp_dir, uploaded_pdf_name)
-      file.copy(input$pdf_report$datapath, uploaded_pdf_path, overwrite = TRUE)
+      file.copy(input$pdf_report$datapath,
+                file.path(exp_dir, uploaded_pdf_name),
+                overwrite = TRUE)
     }
 
-    # ---- Combine date + times ----
+    # Combine date + times
     exp_date <- input$experiment_date
     surgery_start_time        <- as.POSIXct(paste(exp_date, input$surgery_time))
     tissue_acquisition_time   <- as.POSIXct(paste(exp_date, input$tissue_acquisition_time))
@@ -123,44 +113,31 @@ server <- function(input, output, session) {
     sequencing_start_time     <- as.POSIXct(paste(exp_date, input$sequencing_time))
     nanodx_pdf_report_time    <- as.POSIXct(paste(exp_date, input$nanodx_report_time))
 
-    # ---- Create new record ----
+    # Create record
     new_entry <- data.table(
-      SampleID                    = input$sample_id,
-      ExperimentID                = input$experiment_id,
-      Suspected_diagnosis         = input$suspected_diagnosis,
-      Surgery_start_time          = as.character(surgery_start_time),
-      Tissue_acquisition_time     = as.character(tissue_acquisition_time),
-      DNA_extraction_start_time   = as.character(dna_extraction_start_time),
-      Library_prep_time           = as.character(library_prep_time),
-      Sequencing_start_time       = as.character(sequencing_start_time),
-      nanoDx_pdf_report_time      = as.character(nanodx_pdf_report_time),
-      nanoDx_classification       = input$nanodx_classification,
-      nanoDx_score                = input$nanodx_score,
-      Uploaded_PDF = ifelse(
-        !is.na(uploaded_pdf_name),
-        paste0("<a href='/expfiles/", input$experiment_id, "/", uploaded_pdf_name, 
-               "' target='_blank'>", uploaded_pdf_name, "</a>"),
-        ""
-      ),
-      Timestamp = as.character(Sys.time())
+      SampleID                  = input$sample_id,
+      ExperimentID              = input$experiment_id,
+      Suspected_diagnosis       = input$suspected_diagnosis,
+      Surgery_start_time        = as.character(surgery_start_time),
+      Tissue_acquisition_time   = as.character(tissue_acquisition_time),
+      DNA_extraction_start_time = as.character(dna_extraction_start_time),
+      Library_prep_time         = as.character(library_prep_time),
+      Sequencing_start_time     = as.character(sequencing_start_time),
+      nanoDx_pdf_report_time    = as.character(nanodx_pdf_report_time),
+      nanoDx_classification     = input$nanodx_classification,
+      nanoDx_score              = input$nanodx_score,
+      Timestamp                 = as.character(Sys.time())
     )
 
-    # ---- Save or append CSV safely ----
+    # Save CSV
     csv_file <- file.path(exp_dir, paste0(input$experiment_id, "_intraop_results_reporting.csv"))
-    if (file.exists(csv_file)) {
-      existing  <- fread(csv_file, colClasses = "character")
-      new_entry <- new_entry %>% dplyr::mutate(dplyr::across(dplyr::everything(), as.character))
-      updated   <- rbind(existing, new_entry, fill = TRUE)
-    } else {
-      updated   <- new_entry %>% dplyr::mutate(dplyr::across(dplyr::everything(), as.character))
-    }
-    fwrite(updated, csv_file)
+    fwrite(new_entry, csv_file)
 
-    # ---- Generate automatic report (PDF -> HTML fallback) ----
+    # Generate summary report (always HTML to avoid LaTeX dependency)
     rmd_content <- glue("
 ---
 title: 'Intraoperative Report Summary'
-output: pdf_document
+output: html_document
 ---
 
 **Sample ID:** {input$sample_id}  
@@ -183,50 +160,47 @@ Generated on: {Sys.time()}
 ")
     tmp_rmd <- tempfile(fileext = ".Rmd")
     writeLines(rmd_content, tmp_rmd)
+    summary_file <- file.path(exp_dir, paste0(input$sample_id, "_summary.html"))
+    rmarkdown::render(tmp_rmd, output_file = summary_file, quiet = TRUE)
 
-    pdf_name  <- paste0(input$sample_id, "_summary_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".pdf")
-    html_name <- sub("\\.pdf$", ".html", pdf_name)
-    report_path <- file.path(exp_dir, pdf_name)
-    report_ok <- FALSE
+    # Create zip archive for download
+    zip_path <- tempfile(fileext = ".zip")
+    zip::zipr(zip_path, files = list.files(exp_dir, full.names = TRUE))
 
-    try({
-      rmarkdown::render(tmp_rmd, output_format = rmarkdown::pdf_document(),
-                        output_file = pdf_name, output_dir = exp_dir, quiet = TRUE)
-      report_ok <- TRUE
-    }, silent = TRUE)
+    # Store path so downloadHandler can use it
+    records_rv(zip_path)
 
-    if (!report_ok) {
-      rmarkdown::render(tmp_rmd, output_format = rmarkdown::html_document(self_contained = TRUE),
-                        output_file = html_name, output_dir = exp_dir, quiet = TRUE)
-      report_path <- file.path(exp_dir, html_name)
-    }
-
-    report_href <- paste0("/expfiles/", input$experiment_id, "/", basename(report_path))
-    new_entry[, Auto_Report := paste0("<a href='", report_href, "' target='_blank'>Summary Report</a>")]
-
-    # ---- Update display table ----
-    records_display <- updated
-    records_display$Auto_Report <- paste0("<a href='", report_href, "' target='_blank'>Summary Report</a>")
-    records_rv(records_display)
-
-    # ---- Reset form ----
+    # Reset form
     reset("input_form")
-    showNotification("Entry saved and form reset.", type = "message")
+    showNotification("Entry saved — ZIP ready for download below.", type = "message")
   })
 
-  # ---- Display experiment records ----
+  # ---- Download ZIP ----
+  output$download_zip <- downloadHandler(
+    filename = function() {
+      paste0(input$experiment_id, "_IntraOp_Report.zip")
+    },
+    content = function(file) {
+      req(records_rv())
+      file.copy(records_rv(), file)
+    },
+    contentType = "application/zip"
+  )
+
+  # ---- Show table ----
   output$records <- renderDT({
-    req(input$experiment_id)
-    csv_file <- file.path(data_dir, input$experiment_id,
-                          paste0(input$experiment_id, "_intraop_results_reporting.csv"))
-    if (file.exists(csv_file)) {
-      dat <- fread(csv_file)
-      datatable(dat, escape = FALSE, options = list(pageLength = 10, scrollX = TRUE))
+    if (!is.null(records_rv())) {
+      datatable(data.table(File = basename(records_rv())),
+                options = list(dom = "t"),
+                rownames = FALSE)
     } else {
-      datatable(data.table(Message = "No records yet for this experiment."))
+      datatable(data.table(Message = "No saved entries yet."),
+                options = list(dom = "t"),
+                rownames = FALSE)
     }
   })
 }
+
 
 # Run app
 shinyApp(ui = ui, server = server)
