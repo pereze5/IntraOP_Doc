@@ -17,18 +17,17 @@ library(glue)
 library(shinyTime)
 
 # --- Define base data directory on Charité network drive ---
+# Try to use Charité network path, fall back to local storage
 base_dir <- "\\\\Charite.de\\Centren\\AG\\AG-Euskirchen\\Daten\\IntraOP_Berlin"
 
-# Ensure the directory exists
 if (!dir.exists(base_dir)) {
-  dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
+  message("⚠️ Network path not available, using local 'data' folder instead.")
+  base_dir <- "data"
 }
 
-# For consistency, use subfolder "data"
-data_dir <- file.path(base_dir, "data")
-if (!dir.exists(data_dir)) {
-  dir.create(data_dir, recursive = TRUE)
-}
+if (!dir.exists(base_dir)) dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
+data_dir <- file.path(base_dir)
+
 
 # Define UI
 ui <- fluidPage(
@@ -43,25 +42,28 @@ ui <- fluidPage(
   
   sidebarLayout(
     sidebarPanel(
-      id = "input_form",   # <-- this is important
-      textInput("sample_id", "Sample ID (IOPX):"),
-      textInput("experiment_id", "Experiment ID (YYYY_MM_DD_IOPX):"),
-      dateInput("experiment_date", "Experiment Date:", value = Sys.Date()),
-      textInput("suspected_diagnosis", "Suspected Diagnosis:"),
-      
-      textInput("surgery_time", "Surgery Time (HH:MM):", placeholder = "e.g. 13:15"),
-      textInput("tissue_acquisition_time", "Tissue Acquisition Time (HH:MM):", placeholder = "e.g. 13:45"),
-      textInput("dna_extraction_time", "DNA Extraction Start (HH:MM):", placeholder = "e.g. 14:10"),
-      textInput("library_prep_time", "Library Prep Time (HH:MM):", placeholder = "e.g. 16:00"),
-      textInput("sequencing_time", "Sequencing Start (HH:MM):", placeholder = "e.g. 18:30"),
-      textInput("nanodx_report_time", "nanoDx Report Time (HH:MM):", placeholder = "e.g. 21:00"),
-      
-      textInput("nanodx_classification", "nanoDx Classification:"),
-      numericInput("nanodx_score", "nanoDx Score:", value = NA, min = 0, max = 1, step = 0.01),
-      fileInput("pdf_report", "Attach nanoDx PDF report:", accept = ".pdf"),
-      actionButton("save", "Save Entry", class = "btn-primary"),
-      width = 4
-    ),
+  div(
+    id = "input_form",
+    
+    textInput("sample_id", "Sample ID (IOPX):"),
+    textInput("experiment_id", "Experiment ID (YYYY_MM_DD_IOPX):"),
+    dateInput("experiment_date", "Experiment Date:", value = Sys.Date()),
+    textInput("suspected_diagnosis", "Suspected Diagnosis:"),
+
+    textInput("surgery_time", "Surgery Time (HH:MM):", placeholder = "e.g. 13:15"),
+    textInput("tissue_acquisition_time", "Tissue Acquisition Time (HH:MM):", placeholder = "e.g. 13:45"),
+    textInput("dna_extraction_time", "DNA Extraction Start (HH:MM):", placeholder = "e.g. 14:10"),
+    textInput("library_prep_time", "Library Prep Time (HH:MM):", placeholder = "e.g. 16:00"),
+    textInput("sequencing_time", "Sequencing Start (HH:MM):", placeholder = "e.g. 18:30"),
+    textInput("nanodx_report_time", "nanoDx Report Time (HH:MM):", placeholder = "e.g. 21:00"),
+    
+    textInput("nanodx_classification", "nanoDx Classification:"),
+    numericInput("nanodx_score", "nanoDx Score:", value = NA, min = 0, max = 1, step = 0.01),
+    fileInput("pdf_report", "Attach nanoDx PDF report:", accept = ".pdf"),
+    actionButton("save", "Save Entry", class = "btn-primary")
+  ),
+  width = 4
+),
     
     mainPanel(
       h4("Recorded Entries for Current Experiment"),
@@ -180,7 +182,8 @@ Generated on: {Sys.time()}
     records_rv(records_display)
     
     # Reset inputs
-    reset("form_id")
+    reset("input_form")
+    showNotification("Entry saved and form reset.", type = "message")
   })
   
   
