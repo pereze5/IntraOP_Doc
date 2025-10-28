@@ -76,16 +76,36 @@ ui <- fluidPage(
 
 # Define server logic
 server <- function(input, output, session) {
-  
+
+  # --- Expose local/network data_dir for browser access ---
+  addResourcePath("expfiles", data_dir)
+
   records_rv <- reactiveVal(data.table())
-  
+
+  # Simple helpers
+  valid_hhmm <- function(x) grepl("^([01]?\\d|2[0-3]):[0-5]\\d$", x %||% "")
+  `%||%` <- function(a, b) if (is.null(a) || is.na(a)) b else a
+
   observeEvent(input$save, {
     req(input$experiment_id, input$sample_id)
-    
-    # Create experiment-specific directory
+
+    # ---- Validate time fields ----
+    if (!all(
+      valid_hhmm(input$surgery_time),
+      valid_hhmm(input$tissue_acquisition_time),
+      valid_hhmm(input$dna_extraction_time),
+      valid_hhmm(input$library_prep_time),
+      valid_hhmm(input$sequencing_time),
+      valid_hhmm(input$nanodx_report_time)
+    )) {
+      showNotification("Please enter all times as HH:MM (24h).", type = "error")
+      return()
+    }
+
+    # ---- Create experiment-specific directory ----
     exp_dir <- file.path(data_dir, input$experiment_id)
     if (!dir.exists(exp_dir)) dir.create(exp_dir, recursive = TRUE)
-    
+
     # ---- Handle uploaded PDF ----
     uploaded_pdf_name <- NA
     if (!is.null(input$pdf_report)) {
@@ -93,51 +113,50 @@ server <- function(input, output, session) {
       uploaded_pdf_path <- file.path(exp_dir, uploaded_pdf_name)
       file.copy(input$pdf_report$datapath, uploaded_pdf_path, overwrite = TRUE)
     }
-    
-    # ---- Combine date and time inputs ----
+
+    # ---- Combine date + times ----
     exp_date <- input$experiment_date
-    surgery_start_time <- as.POSIXct(paste(exp_date, input$surgery_time))
-    tissue_acquisition_time <- as.POSIXct(paste(exp_date, input$tissue_acquisition_time))
+    surgery_start_time        <- as.POSIXct(paste(exp_date, input$surgery_time))
+    tissue_acquisition_time   <- as.POSIXct(paste(exp_date, input$tissue_acquisition_time))
     dna_extraction_start_time <- as.POSIXct(paste(exp_date, input$dna_extraction_time))
-    library_prep_time <- as.POSIXct(paste(exp_date, input$library_prep_time))
-    sequencing_start_time <- as.POSIXct(paste(exp_date, input$sequencing_time))
-    nanodx_pdf_report_time <- as.POSIXct(paste(exp_date, input$nanodx_report_time))
-    
+    library_prep_time         <- as.POSIXct(paste(exp_date, input$library_prep_time))
+    sequencing_start_time     <- as.POSIXct(paste(exp_date, input$sequencing_time))
+    nanodx_pdf_report_time    <- as.POSIXct(paste(exp_date, input$nanodx_report_time))
+
     # ---- Create new record ----
     new_entry <- data.table(
-      SampleID = input$sample_id,
-      ExperimentID = input$experiment_id,
-      Suspected_diagnosis = input$suspected_diagnosis,
-      Surgery_start_time = as.character(surgery_start_time),
-      Tissue_acquisition_time = as.character(tissue_acquisition_time),
-      DNA_extraction_start_time = as.character(dna_extraction_start_time),
-      Library_prep_time = as.character(library_prep_time),
-      Sequencing_start_time = as.character(sequencing_start_time),
-      nanoDx_pdf_report_time = as.character(nanodx_pdf_report_time),
-      nanoDx_classification = input$nanodx_classification,
-      nanoDx_score = input$nanodx_score,
-      Uploaded_PDF = ifelse(!is.na(uploaded_pdf_name),
-                            paste0("<a href='", file.path(exp_dir, uploaded_pdf_name), "' target='_blank'>", uploaded_pdf_name, "</a>"),
-                            ""),
+      SampleID                    = input$sample_id,
+      ExperimentID                = input$experiment_id,
+      Suspected_diagnosis         = input$suspected_diagnosis,
+      Surgery_start_time          = as.character(surgery_start_time),
+      Tissue_acquisition_time     = as.character(tissue_acquisition_time),
+      DNA_extraction_start_time   = as.character(dna_extraction_start_time),
+      Library_prep_time           = as.character(library_prep_time),
+      Sequencing_start_time       = as.character(sequencing_start_time),
+      nanoDx_pdf_report_time      = as.character(nanodx_pdf_report_time),
+      nanoDx_classification       = input$nanodx_classification,
+      nanoDx_score                = input$nanodx_score,
+      Uploaded_PDF = ifelse(
+        !is.na(uploaded_pdf_name),
+        paste0("<a href='/expfiles/", input$experiment_id, "/", uploaded_pdf_name, 
+               "' target='_blank'>", uploaded_pdf_name, "</a>"),
+        ""
+      ),
       Timestamp = as.character(Sys.time())
     )
-    
-    # ---- Save to CSV ----
+
+    # ---- Save or append CSV safely ----
     csv_file <- file.path(exp_dir, paste0(input$experiment_id, "_intraop_results_reporting.csv"))
     if (file.exists(csv_file)) {
-      existing <- fread(csv_file)
-      updated <- rbind(existing, new_entry, fill = TRUE)
+      existing  <- fread(csv_file, colClasses = "character")
+      new_entry <- new_entry %>% dplyr::mutate(dplyr::across(dplyr::everything(), as.character))
+      updated   <- rbind(existing, new_entry, fill = TRUE)
     } else {
-      updated <- new_entry
+      updated   <- new_entry %>% dplyr::mutate(dplyr::across(dplyr::everything(), as.character))
     }
     fwrite(updated, csv_file)
-    
-    # ---- Generate automatic PDF summary ----
-    pdf_summary_name <- paste0(input$sample_id, "_summary_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".pdf")
-    pdf_summary_path <- normalizePath(file.path(exp_dir, pdf_summary_name), mustWork = FALSE)
-    
-    if (!dir.exists(dirname(pdf_summary_path))) dir.create(dirname(pdf_summary_path), recursive = TRUE)
-    
+
+    # ---- Generate automatic report (PDF -> HTML fallback) ----
     rmd_content <- glue("
 ---
 title: 'Intraoperative Report Summary'
@@ -162,35 +181,44 @@ output: pdf_document
 
 Generated on: {Sys.time()}
 ")
-    
     tmp_rmd <- tempfile(fileext = ".Rmd")
     writeLines(rmd_content, tmp_rmd)
-    
-    rmarkdown::render(
-      tmp_rmd,
-      output_file = basename(pdf_summary_path),
-      output_dir = exp_dir,
-      quiet = TRUE
-    )
-    
-    # Add PDF link
-    new_entry[, Auto_PDF := paste0("<a href='", pdf_summary_path, "' target='_blank'>Summary PDF</a>")]
-    
-    # Update reactive table
+
+    pdf_name  <- paste0(input$sample_id, "_summary_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".pdf")
+    html_name <- sub("\\.pdf$", ".html", pdf_name)
+    report_path <- file.path(exp_dir, pdf_name)
+    report_ok <- FALSE
+
+    try({
+      rmarkdown::render(tmp_rmd, output_format = rmarkdown::pdf_document(),
+                        output_file = pdf_name, output_dir = exp_dir, quiet = TRUE)
+      report_ok <- TRUE
+    }, silent = TRUE)
+
+    if (!report_ok) {
+      rmarkdown::render(tmp_rmd, output_format = rmarkdown::html_document(self_contained = TRUE),
+                        output_file = html_name, output_dir = exp_dir, quiet = TRUE)
+      report_path <- file.path(exp_dir, html_name)
+    }
+
+    report_href <- paste0("/expfiles/", input$experiment_id, "/", basename(report_path))
+    new_entry[, Auto_Report := paste0("<a href='", report_href, "' target='_blank'>Summary Report</a>")]
+
+    # ---- Update display table ----
     records_display <- updated
-    records_display$Auto_PDF <- paste0("<a href='", pdf_summary_path, "' target='_blank'>Summary PDF</a>")
+    records_display$Auto_Report <- paste0("<a href='", report_href, "' target='_blank'>Summary Report</a>")
     records_rv(records_display)
-    
-    # Reset inputs
+
+    # ---- Reset form ----
     reset("input_form")
     showNotification("Entry saved and form reset.", type = "message")
   })
-  
-  
-  # ---- Display current experiment's records ----
+
+  # ---- Display experiment records ----
   output$records <- renderDT({
     req(input$experiment_id)
-    csv_file <- file.path(data_dir, input$experiment_id, paste0(input$experiment_id, "_intraop_results_reporting.csv"))
+    csv_file <- file.path(data_dir, input$experiment_id,
+                          paste0(input$experiment_id, "_intraop_results_reporting.csv"))
     if (file.exists(csv_file)) {
       dat <- fread(csv_file)
       datatable(dat, escape = FALSE, options = list(pageLength = 10, scrollX = TRUE))
